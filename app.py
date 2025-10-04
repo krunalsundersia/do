@@ -29,13 +29,19 @@ CORS(app)
 # Initialize OAuth
 oauth = OAuth(app)
 
-# OAuth Registrations
+# OAuth Registrations - FIXED: Use proper configuration
 google = oauth.register(
     name='google',
     client_id=app.config["GOOGLE_CLIENT_ID"],
     client_secret=app.config["GOOGLE_CLIENT_SECRET"],
-    server_metadata_url='https://accounts.google.com/.well-known/openid-configuration',
-    client_kwargs={'scope': 'openid email profile'},
+    access_token_url='https://accounts.google.com/o/oauth2/token',
+    authorize_url='https://accounts.google.com/o/oauth2/auth',
+    api_base_url='https://www.googleapis.com/oauth2/v1/',
+    client_kwargs={
+        'scope': 'openid email profile',
+        'token_endpoint_auth_method': 'client_secret_post'
+    },
+    server_metadata_url='https://accounts.google.com/.well-known/openid-configuration'
 )
 
 # Token management
@@ -77,9 +83,9 @@ def index():
 @app.route('/login/google')
 def google_login():
     try:
-        google = oauth.create_client('google')
         redirect_uri = url_for('google_authorize', _external=True)
-        return google.authorize_redirect(redirect_uri)
+        logger.info(f"Redirect URI: {redirect_uri}")
+        return oauth.google.authorize_redirect(redirect_uri)
     except Exception as e:
         logger.error(f"Google login error: {str(e)}")
         return "Authentication error", 500
@@ -87,11 +93,20 @@ def google_login():
 @app.route('/login/google/authorize')
 def google_authorize():
     try:
-        google = oauth.create_client('google')
-        token = google.authorize_access_token()
-        resp = google.get('userinfo')
-        user_info = resp.json()
+        # Get the token
+        token = oauth.google.authorize_access_token()
+        logger.info(f"Token received: {token}")
         
+        # Get user info
+        resp = oauth.google.get('userinfo')
+        if resp.status_code != 200:
+            logger.error(f"Google API error: {resp.status_code} - {resp.text}")
+            return "Failed to fetch user information", 400
+            
+        user_info = resp.json()
+        logger.info(f"User info: {user_info}")
+        
+        # Store user in session
         session['user'] = {
             'name': user_info.get('name'),
             'email': user_info.get('email'),
@@ -99,12 +114,12 @@ def google_authorize():
             'provider': 'google'
         }
         
-        logger.info(f"User logged in: {user_info.get('email')}")
+        logger.info(f"User logged in successfully: {user_info.get('email')}")
         return redirect(url_for('index'))
     
     except Exception as e:
-        logger.error(f"Google auth error: {str(e)}")
-        return "Authentication failed. Please try again."
+        logger.error(f"Google auth error: {str(e)}", exc_info=True)
+        return "Authentication failed. Please try again.", 400
 
 @app.route('/logout')
 def logout():
@@ -208,19 +223,17 @@ def generate(bot_name: str, system: str, user: str, file_contents: list = None):
         error_msg = f"Failed to generate response: {str(exc)}"
         yield f"data: {json.dumps({'bot': bot_name, 'error': error_msg})}\n\n"
 
-@app.route("/chat", methods=["GET"]) # <-- FIX: Changed from POST to GET
+@app.route("/chat", methods=["POST"])
 def chat():
     try:
         # Check if user is logged in
         if not session.get('user'):
-            # This error won't show in the frontend directly but is good practice
             return jsonify(error="Please login first"), 401
         
-        # <-- FIX: Read from query args instead of JSON body to work with EventSource
-        prompt = request.args.get("prompt", "").strip()
-        file_urls_json = request.args.get("fileUrls", "[]")
-        fileUrls = json.loads(file_urls_json)
-
+        data = request.json or {}
+        prompt = data.get("prompt", "").strip()
+        fileUrls = data.get("fileUrls", [])
+        
         if not prompt and not fileUrls:
             return jsonify(error="Empty prompt and no files provided"), 400
         
@@ -246,12 +259,10 @@ def chat():
                         yield chunk
                         
                         try:
-                            chunk_data_str = chunk.split('data: ')[1]
-                            if chunk_data_str.strip(): # Ensure not empty
-                                chunk_data = json.loads(chunk_data_str)
-                                if chunk_data.get('done') or chunk_data.get('error'):
-                                    active_bots.remove(bot_name)
-                        except (json.JSONDecodeError, IndexError):
+                            chunk_data = json.loads(chunk.split('data: ')[1])
+                            if chunk_data.get('done') or chunk_data.get('error'):
+                                active_bots.remove(bot_name)
+                        except:
                             pass
                             
                     except StopIteration:
