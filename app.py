@@ -208,17 +208,19 @@ def generate(bot_name: str, system: str, user: str, file_contents: list = None):
         error_msg = f"Failed to generate response: {str(exc)}"
         yield f"data: {json.dumps({'bot': bot_name, 'error': error_msg})}\n\n"
 
-@app.route("/chat", methods=["POST"])
+@app.route("/chat", methods=["GET"]) # <-- FIX: Changed from POST to GET
 def chat():
     try:
         # Check if user is logged in
         if not session.get('user'):
+            # This error won't show in the frontend directly but is good practice
             return jsonify(error="Please login first"), 401
         
-        data = request.json or {}
-        prompt = data.get("prompt", "").strip()
-        fileUrls = data.get("fileUrls", [])
-        
+        # <-- FIX: Read from query args instead of JSON body to work with EventSource
+        prompt = request.args.get("prompt", "").strip()
+        file_urls_json = request.args.get("fileUrls", "[]")
+        fileUrls = json.loads(file_urls_json)
+
         if not prompt and not fileUrls:
             return jsonify(error="Empty prompt and no files provided"), 400
         
@@ -244,10 +246,12 @@ def chat():
                         yield chunk
                         
                         try:
-                            chunk_data = json.loads(chunk.split('data: ')[1])
-                            if chunk_data.get('done') or chunk_data.get('error'):
-                                active_bots.remove(bot_name)
-                        except:
+                            chunk_data_str = chunk.split('data: ')[1]
+                            if chunk_data_str.strip(): # Ensure not empty
+                                chunk_data = json.loads(chunk_data_str)
+                                if chunk_data.get('done') or chunk_data.get('error'):
+                                    active_bots.remove(bot_name)
+                        except (json.JSONDecodeError, IndexError):
                             pass
                             
                     except StopIteration:
