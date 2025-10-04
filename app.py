@@ -29,19 +29,19 @@ CORS(app)
 # Initialize OAuth
 oauth = OAuth(app)
 
-# OAuth Registrations - FIXED: Use proper configuration
+# OAuth Registrations - FIXED for Vercel
 google = oauth.register(
     name='google',
     client_id=app.config["GOOGLE_CLIENT_ID"],
     client_secret=app.config["GOOGLE_CLIENT_SECRET"],
-    access_token_url='https://accounts.google.com/o/oauth2/token',
+    access_token_url='https://oauth2.googleapis.com/token',
     authorize_url='https://accounts.google.com/o/oauth2/auth',
     api_base_url='https://www.googleapis.com/oauth2/v1/',
     client_kwargs={
         'scope': 'openid email profile',
         'token_endpoint_auth_method': 'client_secret_post'
     },
-    server_metadata_url='https://accounts.google.com/.well-known/openid-configuration'
+    jwks_uri='https://www.googleapis.com/oauth2/v3/certs'
 )
 
 # Token management
@@ -83,48 +83,68 @@ def index():
 @app.route('/login/google')
 def google_login():
     try:
-        redirect_uri = url_for('google_authorize', _external=True)
-        logger.info(f"Redirect URI: {redirect_uri}")
+        # Get the actual deployed URL for redirect
+        if 'VERCEL_URL' in os.environ:
+            base_url = f"https://{os.environ['VERCEL_URL']}"
+        else:
+            base_url = request.url_root.rstrip('/')
+        
+        redirect_uri = f"{base_url}/login/google/authorize"
+        logger.info(f"Starting OAuth with redirect: {redirect_uri}")
+        
         return oauth.google.authorize_redirect(redirect_uri)
     except Exception as e:
-        logger.error(f"Google login error: {str(e)}")
-        return "Authentication error", 500
+        logger.error(f"Google login error: {str(e)}", exc_info=True)
+        return f"Authentication error: {str(e)}", 500
 
 @app.route('/login/google/authorize')
 def google_authorize():
     try:
+        logger.info("Google authorize endpoint hit")
+        
         # Get the token
         token = oauth.google.authorize_access_token()
-        logger.info(f"Token received: {token}")
+        logger.info("Token received successfully")
         
+        if not token:
+            logger.error("No token received from Google")
+            return "Authentication failed: No token received", 400
+            
         # Get user info
-        resp = oauth.google.get('userinfo')
+        resp = oauth.google.get('userinfo', token=token)
+        logger.info(f"User info response status: {resp.status_code}")
+        
         if resp.status_code != 200:
             logger.error(f"Google API error: {resp.status_code} - {resp.text}")
-            return "Failed to fetch user information", 400
+            return f"Failed to fetch user information: {resp.status_code}", 400
             
         user_info = resp.json()
-        logger.info(f"User info: {user_info}")
+        logger.info(f"User info received: {user_info.get('email')}")
         
         # Store user in session
         session['user'] = {
-            'name': user_info.get('name'),
-            'email': user_info.get('email'),
-            'picture': user_info.get('picture'),
+            'name': user_info.get('name', 'User'),
+            'email': user_info.get('email', ''),
+            'picture': user_info.get('picture', ''),
             'provider': 'google'
         }
+        
+        # Ensure session is saved
+        session.modified = True
         
         logger.info(f"User logged in successfully: {user_info.get('email')}")
         return redirect(url_for('index'))
     
     except Exception as e:
         logger.error(f"Google auth error: {str(e)}", exc_info=True)
-        return "Authentication failed. Please try again.", 400
+        return f"Authentication failed: {str(e)}", 400
 
 @app.route('/logout')
 def logout():
     session.pop('user', None)
     return redirect(url_for('index'))
+
+# ... (keep the rest of your existing functions: extract_text_from_pdf, generate, chat, asklurk, upload, get_tokens, reset_tokens, health) ...
 
 # File processing
 def extract_text_from_pdf(file_content):
